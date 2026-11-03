@@ -4,9 +4,11 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
- * A comic panel found in a page, as fractions of the page's height.
+ * A comic panel found in a page, as fractions of the page's height. It includes the speech
+ * bubbles and captions that overlap it or sit in the gutter right above it.
  */
 data class WebtoonPanel(
     val top: Float,
@@ -14,121 +16,241 @@ data class WebtoonPanel(
 )
 
 /**
- * Finds the panels of a page by looking for gutters: bands of rows that are a single flat color.
+ * Finds the panels of a page from the gutters between them.
  *
- * It's a heuristic and works best on the usual webtoon layout of panels stacked vertically on a
- * plain background. A page without a gutter is a single panel.
+ * The page's background color is taken from the rows that are a single flat color. Anything else
+ * is content, and content that touches makes one panel, so a bubble overlapping a panel's border
+ * belongs to it and a slanted gutter still splits two panels. A page without a gutter is a single
+ * panel.
  */
 object WebtoonPanelDetector {
 
-    /** How many columns of a row are compared, which is plenty to tell art from a flat gutter. */
-    private const val SAMPLED_COLUMNS = 48
+    /** Columns of the grid the page is looked at through. */
+    private const val GRID_COLUMNS = 96
 
     /** At most this many rows are looked at for a page, whatever its height. */
-    private const val MAX_SAMPLED_ROWS = 3000
+    private const val MAX_SAMPLED_ROWS = 4000
 
-    /** How far, per channel, a pixel may be from the row's first one for the row to stay flat. */
+    /** How far, per channel, a pixel may be from the background color to still be background. */
     private const val COLOR_TOLERANCE = 24
 
-    /** Share of a row's pixels that may break the color, for JPEG noise and thin borders. */
-    private const val OUTLIER_SHARE = 0.04f
+    /** Share of a row that may break its color for it to still count as flat, for JPEG noise. */
+    private const val FLAT_ROW_SHARE = 0.96f
 
-    /** Shortest gutter, as a share of the page's width. */
-    private const val MIN_GUTTER_SHARE = 0.02f
+    /** Share of the flat rows a color needs to count as a background color. */
+    private const val BACKGROUND_SHARE = 0.1f
 
-    /** Shortest panel, as a share of the page's width. Smaller ones are joined to a neighbour. */
-    private const val MIN_PANEL_SHARE = 0.12f
+    /** Pixels of a cell that must be content for the cell to be, so lone noisy pixels don't count. */
+    private const val MIN_CONTENT_PIXELS = 2
+
+    /** Specks of fewer cells than this, like dust in a gutter, are ignored. */
+    private const val MIN_SPECK_CELLS = 4
+
+    /** Pieces overlapping this share of the smaller one's height are one panel, like art floating in it. */
+    private const val MERGE_OVERLAP_SHARE = 0.5f
 
     /**
-     * Returns the panels of the page drawn by [strips], stacked from top to bottom.
-     * [isCancelled] is checked between rows so a page that went away stops early.
+     * Pieces shorter than this, as a share of the page's width, are captions or bubbles rather
+     * than panels, and go with the panel below them.
+     */
+    private const val MIN_PANEL_SHARE = 0.4f
+
+    /**
+     * Returns the panels of the page drawn by [strips], from top to bottom. Panels split by a
+     * slanted gutter overlap a little. [isCancelled] is checked between rows so a page that went
+     * away stops early.
      */
     fun detect(strips: List<Bitmap>, isCancelled: () -> Boolean = { false }): List<WebtoonPanel> {
         val width = strips.firstOrNull()?.width ?: return emptyList()
         val height = strips.sumOf { it.height }
         if (width <= 0 || height <= 0) return emptyList()
 
-        val rowStep = max(1, height / MAX_SAMPLED_ROWS)
-        val columnStep = max(1, width / SAMPLED_COLUMNS)
-        val row = IntArray(width)
+        val rowStep = max(1, (height + MAX_SAMPLED_ROWS - 1) / MAX_SAMPLED_ROWS)
+        val rowCount = (height + rowStep - 1) / rowStep
+        val rows = RowReader(strips, width, rowStep)
 
-        // Whether each sampled row is flat
-        val flat = BooleanArray((height + rowStep - 1) / rowStep)
-        var stripTop = 0
-        var stripIndex = 0
-        for (i in flat.indices) {
-            if (isCancelled()) return emptyList()
-            val y = i * rowStep
-            while (y >= stripTop + strips[stripIndex].height) {
-                stripTop += strips[stripIndex].height
-                stripIndex++
-            }
-            val strip = strips[stripIndex]
-            if (strip.isRecycled) return emptyList()
-            strip.getPixels(row, 0, width, 0, y - stripTop, width, 1)
-            flat[i] = isFlat(row, columnStep)
-        }
+        val backgrounds = backgroundColors(rows, rowCount, isCancelled) ?: return emptyList()
+        val columns = min(GRID_COLUMNS, width)
+        val content = contentGrid(rows, rowCount, columns, backgrounds, isCancelled) ?: return emptyList()
 
-        // Runs of rows that aren't flat are panels, split where a gutter is tall enough
-        val minGutterRows = max(1, (width * MIN_GUTTER_SHARE / rowStep).toInt())
-        val runs = mutableListOf<IntRange>()
-        var start = -1
-        var gap = 0
-        for (i in flat.indices) {
-            if (!flat[i]) {
-                if (start == -1) start = i
-                gap = 0
-            } else if (start != -1) {
-                gap++
-                if (gap >= minGutterRows) {
-                    runs += start..<(i - gap + 1)
-                    start = -1
-                    gap = 0
-                }
-            }
-        }
-        if (start != -1) runs += start..<(flat.size - gap)
+        val pieces = connectedPieces(content, rowCount, columns)
+        val panels = mergePieces(pieces, rowCount, minRows = width * MIN_PANEL_SHARE / rowStep)
 
-        // Too short to be a panel, like a caption or a sound effect between panels: join it to the closer neighbour
-        val minPanelRows = max(1, (width * MIN_PANEL_SHARE / rowStep).toInt())
-        val panels = runs.toMutableList()
-        var i = 0
-        while (i < panels.size && panels.size > 1) {
-            val run = panels[i]
-            if (run.last - run.first + 1 >= minPanelRows) {
-                i++
-                continue
-            }
-            val gapAbove = if (i > 0) run.first - panels[i - 1].last else Int.MAX_VALUE
-            val gapBelow = if (i < panels.lastIndex) panels[i + 1].first - run.last else Int.MAX_VALUE
-            if (gapAbove <= gapBelow) {
-                panels[i - 1] = panels[i - 1].first..run.last
-                panels.removeAt(i)
-            } else {
-                panels[i + 1] = run.first..panels[i + 1].last
-                panels.removeAt(i)
-            }
-        }
-
-        return panels.map { run ->
+        return panels.map { (top, bottom) ->
             WebtoonPanel(
-                top = (run.first * rowStep).toFloat() / height,
-                bottom = ((run.last + 1) * rowStep).coerceAtMost(height).toFloat() / height,
+                top = (top * rowStep).toFloat() / height,
+                bottom = min(height, bottom * rowStep).toFloat() / height,
             )
         }
     }
 
-    private fun isFlat(row: IntArray, columnStep: Int): Boolean {
-        val reference = row[0]
-        var samples = 0
-        var outliers = 0
-        var x = 0
-        while (x < row.size) {
-            samples++
-            if (!isClose(row[x], reference)) outliers++
-            x += columnStep
+    /**
+     * Reads every [rowStep]th row of the page into [row], one at a time, so the page is never
+     * copied whole.
+     */
+    private class RowReader(private val strips: List<Bitmap>, val width: Int, private val rowStep: Int) {
+        val row = IntArray(width)
+
+        /** Reads the [index]th sampled row, or returns false when the strips were recycled. */
+        fun read(index: Int): Boolean {
+            var y = index * rowStep
+            for (strip in strips) {
+                if (y < strip.height) {
+                    if (strip.isRecycled) return false
+                    strip.getPixels(row, 0, width, 0, y, width, 1)
+                    return true
+                }
+                y -= strip.height
+            }
+            return false
         }
-        return outliers <= samples * OUTLIER_SHARE
+    }
+
+    /** The colors of the page's gutters, from its flat rows. White when it has none. */
+    private fun backgroundColors(rows: RowReader, rowCount: Int, isCancelled: () -> Boolean): List<Int>? {
+        val width = rows.width
+        val row = rows.row
+        // Count the flat rows' colors, roughly, keeping the first exact color of each
+        val counts = mutableMapOf<Int, Int>()
+        val firstColor = mutableMapOf<Int, Int>()
+        var flatRows = 0
+        for (i in 0..<rowCount) {
+            if (isCancelled() || !rows.read(i)) return null
+            val reference = row[0]
+            var matching = 0
+            for (x in 0..<width) {
+                if (isClose(row[x], reference)) matching++
+            }
+            if (matching < width * FLAT_ROW_SHARE) continue
+            flatRows++
+            val key = (Color.red(reference) / 32 shl 6) or (Color.green(reference) / 32 shl 3) or
+                (Color.blue(reference) / 32)
+            counts[key] = (counts[key] ?: 0) + 1
+            firstColor.putIfAbsent(key, reference)
+        }
+        if (flatRows == 0) return listOf(Color.WHITE)
+        return counts
+            .filterValues { it >= max(1f, flatRows * BACKGROUND_SHARE) }
+            .keys
+            .map { firstColor.getValue(it) }
+    }
+
+    /** Whether each cell of the grid holds something other than the background. */
+    private fun contentGrid(
+        rows: RowReader,
+        rowCount: Int,
+        columns: Int,
+        backgrounds: List<Int>,
+        isCancelled: () -> Boolean,
+    ): BooleanArray? {
+        val width = rows.width
+        val row = rows.row
+        val content = BooleanArray(rowCount * columns)
+        for (i in 0..<rowCount) {
+            if (isCancelled() || !rows.read(i)) return null
+            for (column in 0..<columns) {
+                val start = column * width / columns
+                val end = (column + 1) * width / columns
+                var pixels = 0
+                for (x in start..<end) {
+                    val color = row[x]
+                    if (backgrounds.none { isClose(color, it) }) {
+                        pixels++
+                        if (pixels >= MIN_CONTENT_PIXELS) break
+                    }
+                }
+                content[i * columns + column] = pixels >= MIN_CONTENT_PIXELS
+            }
+        }
+        return content
+    }
+
+    /** The row ranges, end exclusive, of the groups of touching content cells. */
+    private fun connectedPieces(content: BooleanArray, rowCount: Int, columns: Int): List<IntArray> {
+        val parent = IntArray(content.size) { it }
+        fun find(cell: Int): Int {
+            var c = cell
+            while (parent[c] != c) {
+                parent[c] = parent[parent[c]]
+                c = parent[c]
+            }
+            return c
+        }
+        fun union(a: Int, b: Int) {
+            val rootA = find(a)
+            val rootB = find(b)
+            if (rootA != rootB) parent[rootA] = rootB
+        }
+
+        for (y in 0..<rowCount) {
+            for (x in 0..<columns) {
+                val cell = y * columns + x
+                if (!content[cell]) continue
+                if (x > 0 && content[cell - 1]) union(cell, cell - 1)
+                if (y == 0) continue
+                for (dx in -1..1) {
+                    val nx = x + dx
+                    if (nx in 0..<columns && content[cell - columns + dx]) union(cell, cell - columns + dx)
+                }
+            }
+        }
+
+        // Root -> top, bottom (exclusive) and size
+        val pieces = mutableMapOf<Int, IntArray>()
+        for (y in 0..<rowCount) {
+            for (x in 0..<columns) {
+                val cell = y * columns + x
+                if (!content[cell]) continue
+                val piece = pieces.getOrPut(find(cell)) { intArrayOf(y, y + 1, 0) }
+                piece[1] = max(piece[1], y + 1)
+                piece[2]++
+            }
+        }
+        return pieces.values.filter { it[2] >= MIN_SPECK_CELLS }
+    }
+
+    /**
+     * Joins the pieces into panels: pieces mostly within another are part of it, and pieces
+     * shorter than [minRows] go with the panel below. A piece cut by the page's top or bottom
+     * edge stays apart, as it's likely part of a panel on the page next to it.
+     */
+    private fun mergePieces(pieces: List<IntArray>, rowCount: Int, minRows: Float): List<Pair<Int, Int>> {
+        val panels = pieces.map { intArrayOf(it[0], it[1]) }.sortedBy { it[0] }.toMutableList()
+
+        var merged = true
+        while (merged) {
+            merged = false
+            panels.sortBy { it[0] }
+            for (i in 0..<panels.lastIndex) {
+                val a = panels[i]
+                val b = panels[i + 1]
+                val overlap = min(a[1], b[1]) - max(a[0], b[0])
+                if (overlap > MERGE_OVERLAP_SHARE * min(a[1] - a[0], b[1] - b[0])) {
+                    panels[i] = intArrayOf(min(a[0], b[0]), max(a[1], b[1]))
+                    panels.removeAt(i + 1)
+                    merged = true
+                    break
+                }
+            }
+        }
+
+        var i = 0
+        while (i < panels.size && panels.size > 1) {
+            val panel = panels[i]
+            val isCutByEdge = panel[0] == 0 || panel[1] >= rowCount
+            if (panel[1] - panel[0] >= minRows || isCutByEdge) {
+                i++
+                continue
+            }
+            val target = if (i < panels.lastIndex) i + 1 else i - 1
+            val other = panels[target]
+            panels[target] = intArrayOf(min(panel[0], other[0]), max(panel[1], other[1]))
+            panels.removeAt(i)
+            // The joined panel may now be far enough up to be looked at again
+            i = max(0, min(i, target) - 1)
+        }
+
+        return panels.sortedBy { it[0] }.map { it[0] to it[1] }
     }
 
     private fun isClose(a: Int, b: Int): Boolean {

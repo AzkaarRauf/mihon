@@ -267,8 +267,9 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
 
     /**
      * The distance to scroll to bring the next panel, or the previous one when going back, to
-     * the center of the screen. A panel taller than the screen is read through from its top
-     * to its bottom instead.
+     * the center of the screen. A panel taller than the screen takes two stops instead: its top
+     * at the top of the screen, then its bottom at the bottom. One taller than two screens gets
+     * stops in between, a screen apart, so none of it is skipped.
      *
      * Null when panel navigation is off or there's no panel to go to among the laid out pages,
      * so the caller scrolls a fixed distance instead.
@@ -293,7 +294,7 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
                 val dy = if (panel.height() > viewport) {
                     when {
                         panel.top > tolerance -> panel.top
-                        panel.bottom > viewport + tolerance -> min(scrollDistance, panel.bottom - viewport)
+                        panel.bottom > viewport + tolerance -> min(viewport, panel.bottom - viewport)
                         else -> continue
                     }
                 } else {
@@ -306,7 +307,7 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
                 val dy = if (panel.height() > viewport) {
                     when {
                         panel.bottom < viewport - tolerance -> panel.bottom - viewport
-                        panel.top < -tolerance -> max(-scrollDistance, panel.top)
+                        panel.top < -tolerance -> max(-viewport, panel.top)
                         else -> continue
                     }
                 } else {
