@@ -40,6 +40,7 @@ import com.github.chrisbanes.photoview.PhotoView
 import eu.kanade.tachiyomi.data.coil.ImageDecoder
 import eu.kanade.tachiyomi.data.coil.cropBorders
 import eu.kanade.tachiyomi.data.coil.webtoonStrips
+import eu.kanade.tachiyomi.ui.reader.viewer.webtoon.WebtoonPanel
 import eu.kanade.tachiyomi.ui.reader.viewer.webtoon.WebtoonStripImageView
 import eu.kanade.tachiyomi.util.system.animatorDurationScale
 import eu.kanade.tachiyomi.util.view.isVisibleOnScreen
@@ -195,6 +196,17 @@ open class ReaderPageImageView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The comic panels found in a long strip page, as fractions of the page's height.
+     * Empty for other pages, or when [Config.detectPanels] is off.
+     */
+    val panels: List<WebtoonPanel>
+        get() = (pageView as? WebtoonStripImageView)?.panels.orEmpty()
+
+    /** The view drawing the page, for placing [panels] on screen. */
+    val pageContentView: View?
+        get() = pageView
+
     fun recycle() {
         stripRequest?.dispose()
         stripRequest = null
@@ -348,6 +360,7 @@ open class ReaderPageImageView @JvmOverloads constructor(
 
     private fun setStripImage(data: BufferedSource, config: Config) {
         val view = pageView as? WebtoonStripImageView ?: return
+        view.detectPanels = config.detectPanels
         view.onReload = { requestStrips(view, data, config, isReload = true) }
         requestStrips(view, data, config, isReload = false)
     }
@@ -362,7 +375,7 @@ open class ReaderPageImageView @JvmOverloads constructor(
             .diskCachePolicy(CachePolicy.DISABLED)
             .target(
                 onSuccess = { result ->
-                    view.setImage(result as ImageDecoder.StripsImage)
+                    view.setImage(result as ImageDecoder.StripsImage, isReload)
                     if (!isReload) {
                         view.isVisible = true
                         onImageLoaded()
@@ -467,6 +480,7 @@ open class ReaderPageImageView @JvmOverloads constructor(
         val cropBorders: Boolean = false,
         val zoomStartPosition: ZoomStartPosition = ZoomStartPosition.CENTER,
         val landscapeZoom: Boolean = false,
+        val detectPanels: Boolean = false,
     )
 
     enum class ZoomStartPosition {

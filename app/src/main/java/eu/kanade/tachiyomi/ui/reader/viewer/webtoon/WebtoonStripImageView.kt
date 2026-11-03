@@ -9,6 +9,13 @@ import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.View
 import eu.kanade.tachiyomi.data.coil.ImageDecoder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -39,12 +46,35 @@ class WebtoonStripImageView(context: Context) : View(context) {
 
     private var isReleasedOffScreen = false
 
-    fun setImage(image: ImageDecoder.StripsImage) {
+    /** Whether to look for the page's comic panels once it's decoded, see [panels]. */
+    var detectPanels = false
+
+    /**
+     * Comic panels of the page as fractions of its height, from top to bottom.
+     * Empty while they're being looked for, or when [detectPanels] is off.
+     */
+    var panels: List<WebtoonPanel> = emptyList()
+        private set
+
+    private var detectJob: Job? = null
+
+    /** Held while the strips are read off the main thread, so they aren't recycled meanwhile. */
+    private val stripsLock = Any()
+
+    /**
+     * Shows [image]. [isReload] tells it's the same page decoded again after going off screen,
+     * which keeps the panels found the first time.
+     */
+    fun setImage(image: ImageDecoder.StripsImage, isReload: Boolean = false) {
         releaseStrips()
         isReleasedOffScreen = false
         strips = image.strips
         imageWidth = image.width
         imageHeight = image.height
+        if (!isReload || panels.isEmpty()) {
+            panels = emptyList()
+            startPanelDetection()
+        }
         requestLayout()
         invalidate()
     }
@@ -55,7 +85,24 @@ class WebtoonStripImageView(context: Context) : View(context) {
         onReload = null
         imageWidth = 0
         imageHeight = 0
+        panels = emptyList()
         requestLayout()
+    }
+
+    private fun startPanelDetection() {
+        if (!detectPanels) return
+        val strips = strips
+        detectJob = detectionScope.launch {
+            val found = synchronized(stripsLock) {
+                WebtoonPanelDetector.detect(strips) { !isActive }
+            }
+            withContext(Dispatchers.Main) {
+                // The strips may have been swapped for another page's meanwhile
+                if (this@WebtoonStripImageView.strips === strips) {
+                    panels = found
+                }
+            }
+        }
     }
 
     // The viewer keeps a few pages off screen without recycling them, which adds up for huge pages.
@@ -78,9 +125,13 @@ class WebtoonStripImageView(context: Context) : View(context) {
 
     // A page's strips can be hundreds of MB, which would otherwise wait for a garbage collection to be freed
     private fun releaseStrips() {
+        detectJob?.cancel()
+        detectJob = null
         val released = strips
         strips = emptyList()
-        released.forEach(Bitmap::recycle)
+        synchronized(stripsLock) {
+            released.forEach(Bitmap::recycle)
+        }
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -108,5 +159,7 @@ class WebtoonStripImageView(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean = false
 }
+
+private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
 private const val LARGE_PAGE_BYTES = 64L * 1024 * 1024

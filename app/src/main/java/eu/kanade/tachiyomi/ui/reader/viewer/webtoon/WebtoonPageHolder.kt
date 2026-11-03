@@ -35,7 +35,7 @@ import tachiyomi.core.common.util.system.logcat
  * @constructor creates a new webtoon holder.
  */
 class WebtoonPageHolder(
-    private val frame: ReaderPageImageView,
+    val frame: ReaderPageImageView,
     viewer: WebtoonViewer,
 ) : WebtoonBaseHolder(frame, viewer) {
 
@@ -198,6 +198,7 @@ class WebtoonPageHolder(
                         zoomDuration = viewer.general.doubleTapAnimDuration,
                         minimumScaleType = SubsamplingScaleImageView.SCALE_TYPE_FIT_WIDTH,
                         cropBorders = viewer.longStrip.cropBorders,
+                        detectPanels = viewer.simpleLongStrip.page.panelNavigation,
                     ),
                 )
                 removeErrorLayout()

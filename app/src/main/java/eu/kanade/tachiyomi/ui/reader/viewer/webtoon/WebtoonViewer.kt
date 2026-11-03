@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.ui.reader.viewer.webtoon
 
 import android.graphics.ColorFilter
+import android.graphics.Rect
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import androidx.compose.runtime.Composable
@@ -25,6 +26,7 @@ import eu.kanade.tachiyomi.ui.reader.viewer.LongStripSettings
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.ui.reader.viewer.collectChanges
+import eu.kanade.tachiyomi.util.system.dpToPx
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import mihon.app.di.appGraph
@@ -33,6 +35,7 @@ import java.util.Collections
 import java.util.WeakHashMap
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Implementation of a [Viewer] to display pages with a [RecyclerView].
@@ -238,25 +241,134 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
     }
 
     /**
-     * Scrolls up by [scrollDistance].
+     * Scrolls up to the previous panel when panel navigation is on and panels were found,
+     * otherwise by [scrollDistance].
      */
     override fun moveBackward() {
+        scrollBy(panelScrollDistance(forward = false) ?: -scrollDistance)
+    }
+
+    /**
+     * Scrolls down to the next panel when panel navigation is on and panels were found,
+     * otherwise by [scrollDistance].
+     */
+    override fun moveForward() {
+        scrollBy(panelScrollDistance(forward = true) ?: scrollDistance)
+    }
+
+    private fun scrollBy(dy: Int) {
+        if (dy == 0) return
         if (general.usePageTransitions) {
-            recycler.smoothScrollBy(0, -scrollDistance)
+            recycler.smoothScrollBy(0, dy)
         } else {
-            recycler.scrollBy(0, -scrollDistance)
+            recycler.scrollBy(0, dy)
         }
     }
 
     /**
-     * Scrolls down by [scrollDistance].
+     * The distance to scroll to bring the next panel, or the previous one when going back, to
+     * the center of the screen. A panel taller than the screen is read through from its top
+     * to its bottom instead.
+     *
+     * Null when panel navigation is off or there's no panel to go to among the laid out pages,
+     * so the caller scrolls a fixed distance instead.
      */
-    override fun moveForward() {
-        if (general.usePageTransitions) {
-            recycler.smoothScrollBy(0, scrollDistance)
+    private fun panelScrollDistance(forward: Boolean): Int? {
+        if (!simpleLongStrip.page.panelNavigation) return null
+        // Zoomed in, the screen shows only part of the recycler, so keep to the plain scroll
+        if (recycler.scaleY != 1f) return null
+
+        val panels = visiblePanels()
+        if (panels.isEmpty()) return null
+
+        val viewport = recycler.height
+        val center = viewport / 2
+        // Small differences are left alone, or a panel already in place would be moved to again
+        val tolerance = viewport / 20
+        // Never jump further than a screen and a half, when the next panel isn't laid out yet
+        val maxJump = viewport * 3 / 2
+
+        if (forward) {
+            for (panel in panels) {
+                val dy = if (panel.height() > viewport) {
+                    when {
+                        panel.top > tolerance -> panel.top
+                        panel.bottom > viewport + tolerance -> min(scrollDistance, panel.bottom - viewport)
+                        else -> continue
+                    }
+                } else {
+                    panel.centerY() - center
+                }
+                if (dy > tolerance) return dy.takeIf { it <= maxJump }
+            }
         } else {
-            recycler.scrollBy(0, scrollDistance)
+            for (panel in panels.asReversed()) {
+                val dy = if (panel.height() > viewport) {
+                    when {
+                        panel.bottom < viewport - tolerance -> panel.bottom - viewport
+                        panel.top < -tolerance -> max(-scrollDistance, panel.top)
+                        else -> continue
+                    }
+                } else {
+                    panel.centerY() - center
+                }
+                if (dy < -tolerance) return dy.takeIf { it >= -maxJump }
+            }
         }
+        return null
+    }
+
+    /**
+     * The panels of the laid out pages, in the recycler's coordinates and from top to bottom.
+     * A panel a source cut across two images is joined back into one. An item where no panel
+     * was found, like a page still loading, counts as a single panel.
+     */
+    private fun visiblePanels(): List<Rect> {
+        // Each panel with the adapter position of its page
+        val panels = mutableListOf<Pair<Int, Rect>>()
+        val bounds = Rect()
+        for (i in 0..<recycler.childCount) {
+            val child = recycler.getChildAt(i)
+            val holder = recycler.getChildViewHolder(child)
+            val position = holder.bindingAdapterPosition
+            val pageView = (holder as? WebtoonPageHolder)?.frame?.pageContentView
+            val pagePanels = (holder as? WebtoonPageHolder)?.frame?.panels.orEmpty()
+
+            if (pageView == null || pagePanels.isEmpty() || pageView.height <= 0) {
+                // Still loading, a chapter transition, or nothing found in it: the whole item is one panel
+                if (child.height > 0) {
+                    panels += position to Rect(child.left, child.top, child.right, child.bottom)
+                }
+                continue
+            }
+
+            bounds.set(0, 0, pageView.width, pageView.height)
+            recycler.offsetDescendantRectToMyCoords(pageView, bounds)
+            pagePanels.mapTo(panels) {
+                position to Rect(
+                    bounds.left,
+                    bounds.top + (it.top * bounds.height()).roundToInt(),
+                    bounds.right,
+                    bounds.top + (it.bottom * bounds.height()).roundToInt(),
+                )
+            }
+        }
+        panels.sortBy { it.second.top }
+
+        // Pages that aren't continuous have a margin between them
+        val joinDistance = 4.dpToPx + if (isContinuous) 0 else 15.dpToPx
+        val joined = mutableListOf<Rect>()
+        var lastPosition = -1
+        for ((position, panel) in panels) {
+            val last = joined.lastOrNull()
+            if (last != null && position != lastPosition && panel.top - last.bottom <= joinDistance) {
+                last.bottom = max(last.bottom, panel.bottom)
+            } else {
+                joined += panel
+            }
+            lastPosition = position
+        }
+        return joined
     }
 
     /**

@@ -21,5 +21,7 @@ data class SimpleLongStripSettings(
         override val dualPageInvert: Boolean,
         override val dualPageRotateToFit: Boolean,
         override val dualPageRotateToFitInvert: Boolean,
+        /** Whether a tap or key moves to the next comic panel instead of a fixed distance. */
+        val panelNavigation: Boolean,
     ) : DualPageSettings
 }

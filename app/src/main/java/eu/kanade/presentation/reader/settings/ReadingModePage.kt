@@ -207,6 +207,10 @@ private fun ColumnScope.WebtoonViewerSettings(viewModel: ReaderSettingsViewModel
         label = stringResource(MR.strings.pref_webtoon_disable_zoom_out),
         pref = viewModel.preferences.webtoonDisableZoomOut,
     )
+    CheckboxItem(
+        label = stringResource(MR.strings.pref_webtoon_panel_navigation),
+        pref = viewModel.preferences.webtoonPanelNavigation,
+    )
 }
 
 @Composable

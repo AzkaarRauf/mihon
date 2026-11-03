@@ -178,6 +178,7 @@ class ReaderSettingsViewModel(
         preferences.dualPageInvertWebtoon,
         preferences.dualPageRotateToFitWebtoon,
         preferences.dualPageRotateToFitInvertWebtoon,
+        preferences.webtoonPanelNavigation,
         preferences.webtoonDoubleTapZoomEnabled,
         preferences.navigationModeWebtoon,
         preferences.webtoonNavInverted,
@@ -189,6 +190,7 @@ class ReaderSettingsViewModel(
                 dualPageInvert = dualPageInvertWebtoon.get(),
                 dualPageRotateToFit = dualPageRotateToFitWebtoon.get(),
                 dualPageRotateToFitInvert = dualPageRotateToFitInvertWebtoon.get(),
+                panelNavigation = webtoonPanelNavigation.get(),
             ),
             doubleTapZoom = webtoonDoubleTapZoomEnabled.get(),
             navigation = NavigationSettings(
